@@ -1,0 +1,327 @@
+---
+title: "NYPD Shooting Incident Study"
+author: "H. Shteyn"
+date: "2023-07-19"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+This analysis aims to understand the patterns of NYPD shootings using police data and make predictions based on relevant features
+
+## Importing Data
+
+Technicalities:
+The data was downloaded from https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD .
+
+Libraries that are used in the project: "tidyverse", "lubridate", "xgboost".
+
+It can be installed in the following way:
+
+install.packages("tidyverse")
+
+install.packages("lubridate")
+
+install.packages("xgboost")
+
+In the following step, we import necessary libraries and read the data.
+
+```{r import, warning=FALSE}
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(lubridate))
+suppressPackageStartupMessages(library(xgboost))
+
+
+url_in = "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+df = read_csv(url_in, show_col_types = FALSE)
+```
+
+
+```{r df}
+summary(df)
+```
+
+
+## Data Post-Processing
+
+Processing data after the importing
+
+Checking how many values in the variable, if less than 10 - make it factor
+Setting the threshold for unique values to 10.
+Afterwards the relevant columns were chosen and data was grouped by the relevant for the prediction model variables.
+The subsequent code illustrates these steps.
+
+
+```{r process}
+
+# handling missing values for Random forest model
+# loop over the numerical columns
+numeric_columns <- sapply(df, is.numeric)  # Find numeric columns
+df[numeric_columns] <- lapply(df[numeric_columns], function(x) ifelse(is.na(x), mean(x, na.rm = TRUE), x))
+
+
+# loop over the categorical columns
+categorical_columns <- sapply(df, is.factor)  # Find categorical columns
+df[categorical_columns] <- lapply(df[categorical_columns], function(x) ifelse(is.na(x), names(which.max(table(x))), x))
+
+
+N = 10
+
+# Loop through each column in the dataframe
+for (colname in names(df)) {
+  # Check if the column is character type
+  if (is.character(df[[colname]])) {
+    # Count the unique values
+    num_unique_values <- length(unique(df[[colname]]))
+    
+    # If the count is less than N, convert to factor
+    if (num_unique_values < N) {
+      df[[colname]] <- as.factor(df[[colname]])
+    }
+  }
+}
+
+# convert character to date/time format
+df$OCCUR_DATE = mdy(df$OCCUR_DATE)
+df$OCCUR_TIME = hms(df$OCCUR_TIME)
+
+
+# Print columns types after changing variables format
+sapply(df, class)
+
+# show all the column names
+names(df)
+
+# select only relevant columns
+df_columns <- df %>% select(c("INCIDENT_KEY", "OCCUR_DATE", "BORO", "PRECINCT", "JURISDICTION_CODE", "STATISTICAL_MURDER_FLAG", "PERP_AGE_GROUP", "PERP_SEX", "PERP_RACE", "VIC_AGE_GROUP" , "VIC_SEX" , "VIC_RACE"))
+
+
+# group data by multiple variables for the model
+df_group_all = df_columns %>%
+  group_by(BORO, PERP_AGE_GROUP, PERP_SEX, PERP_RACE, VIC_AGE_GROUP , VIC_SEX, VIC_RACE) %>%
+  summarize(INCIDENT_count = n(), .groups = 'drop') %>%
+  select(INCIDENT_count, BORO, PERP_AGE_GROUP, PERP_SEX, PERP_RACE, VIC_AGE_GROUP , VIC_SEX, VIC_RACE)
+```
+
+
+```{r df_group_all}
+# Dataframe summary after processing
+summary(df_group_all)
+```
+
+## Visualizing Data
+
+2 types of visualizations were created: Incident count over time and Incidents per BORO
+To facilitate the necessary analysis and visualizations, the data was grouped by relevant columns.
+
+```{r visprocess}
+
+# Filter the data starting from 2022
+df_group_date_2023 <- df_columns %>%
+  filter(OCCUR_DATE >= as.Date("2022-01-01"))
+
+# calculate the count of shootings per date
+df_group_date = df_group_date_2023 %>%
+  group_by(OCCUR_DATE) %>%
+  summarize(INCIDENT_count = n(), .groups = 'drop') %>%
+  select(OCCUR_DATE,INCIDENT_count)
+  
+
+# calculate the count of shootings per borough
+df_group_BORO = df_columns %>%
+  group_by(BORO) %>%
+  summarize(INCIDENT_count = n(), .groups = 'drop') %>%
+  select(BORO, INCIDENT_count)
+```
+
+```{r visualization}
+# Incident count over time
+ggplot(df_group_date, aes(x = OCCUR_DATE, y = INCIDENT_count)) +
+  geom_line() +
+  labs(x = "Date", y = "Incident count", title = "Incident count over time") +
+  theme_minimal()
+
+# incidents per BORO
+
+ggplot(df_group_BORO, aes(x = BORO, y = INCIDENT_count)) +
+  geom_bar(stat = "identity") +
+  labs(x = "Date", y = "Incident count", title = "Incident count by BORO") +
+  theme_minimal() +
+  coord_flip()
+```  
+  
+  
+## Modeling the data
+
+## Building a Linear Model
+We predict the incident count using the following features:
+IC_AGE_GROUP, BORO, PERP_AGE_GROUP, PERP_SEX, PERP_RACE, VIC_AGE_GROUP, VIC_SEX, VIC_RACE
+
+```{r model}
+# make linear model
+mod = lm(INCIDENT_count ~ VIC_AGE_GROUP + BORO + PERP_AGE_GROUP + PERP_SEX + PERP_RACE + VIC_SEX + VIC_RACE, data = df_group_all)
+
+# Model summary
+summary(mod)
+```
+Linear model results and thoughts:
+ 
+As it is clearly seen from the summary, the R-squared value is 0.1246, suggesting that about 12.46% of the variability in INCIDENT_count can be explained by the predictors in the model. The "Adjusted R-squared" is 0.1104, meaning that about 11.04% of the variance in INCIDENT_count can be explained by our predictors, adjusting for the number of predictors.
+So from the summary output, it seems that the model does not predict INCIDENT_count very well since it only explains around 11% of its variability.
+
+In order to improve prediction model it was decided to try xgboost algorithm for this matter as it should be more precise 
+
+## Pre-processing Data (processing data for the xgboost prediction)
+
+```{r xgbost_proc, warning=FALSE}
+# Split data into train and test
+set.seed(42)
+train_index <- sample(1:nrow(df_group_all), 0.7*nrow(df_group_all))
+train_data <- df_group_all[train_index, ]
+test_data <- df_group_all[-train_index, ]
+
+# Omit rows with NA values for both train and test datasets
+train_data <- na.omit(train_data)
+test_data <- na.omit(test_data)
+
+# For numeric columns
+for (colname in names(train_data)) {
+  if (is.numeric(train_data[[colname]])) {
+    train_data[[colname]][is.na(train_data[[colname]])] <- mean(train_data[[colname]], na.rm = TRUE)
+  }
+}
+
+# For categorical columns
+for (colname in names(train_data)) {
+  if (is.factor(train_data[[colname]])) {
+    mode_value <- levels(train_data[[colname]])[which.max(table(train_data[[colname]]))]
+    train_data[[colname]][is.na(train_data[[colname]])] <- mode_value
+  }
+}
+
+# Convert data to matrix format as xgboost prefers matrix or DMatrix formats for input data. 
+train_matrix <- as.matrix(train_data[, -which(names(train_data) == "INCIDENT_count")])  # excluding target variable
+test_matrix <- as.matrix(test_data[, -which(names(test_data) == "INCIDENT_count")])
+
+# Convert factors to numeric using one-hot encoding
+train_data_one_hot <- model.matrix(INCIDENT_count ~ . - 1, data=train_data)
+train_labels <- train_data$INCIDENT_count
+
+test_data_one_hot <- model.matrix(INCIDENT_count ~ . - 1, data=test_data)
+test_labels <- test_data$INCIDENT_count
+
+# Combine datasets
+all_data <- rbind(train_data, test_data)
+
+# Apply one-hot encoding
+all_data_one_hot <- model.matrix(INCIDENT_count ~ . - 1, data=all_data)
+
+# Split them back
+train_data_one_hot <- all_data_one_hot[1:nrow(train_data), ]
+test_data_one_hot <- all_data_one_hot[(nrow(train_data) + 1):nrow(all_data_one_hot), ]
+
+```
+
+## XGBOOST prediction and evaluation
+
+```{r xgbost_pred, warning=FALSE}
+# Set parameters
+params <- list(
+  booster = "gbtree",
+  objective = "reg:squarederror",
+  eta = 0.01,
+  max_depth = 6,
+  eval_metric = "rmse"
+)
+
+# Train the model without watchlist and other bells and whistles
+xgb_model <- xgboost(
+  data = as.matrix(train_data_one_hot),
+  label = train_labels,
+  params = params,
+  nrounds = 500,
+  print_every_n = 10000
+)
+
+
+# Predicting using the test data
+predictions <- predict(xgb_model, as.matrix(test_data_one_hot))
+
+
+# Evaluate the Model
+rmse <- sqrt(mean((predictions - test_data$INCIDENT_count)^2))
+print(paste("Test RMSE: ", rmse))
+
+# feature importance
+# Plot feature importance
+importance_matrix <- xgb.importance(feature_names = colnames(train_data_one_hot), model = xgb_model)
+# print most important features:
+print(importance_matrix)
+
+xgb.plot.importance(importance_matrix)
+
+# compare rmse with the baseline rmse
+baseline_predictions <- rep(mean(train_labels), length(test_labels))
+baseline_rmse <- sqrt(mean((test_labels - baseline_predictions)^2))
+print(paste("Baseline RMSE: ", baseline_rmse))
+
+```
+## Thoughts after comparing rmse with baseline rmse
+Given the baseline RMSE of 37.30783 and the RMSE of our XGBoost model at 30.0682, our model is performing significantly better than the baseline.
+
+The RMSE of our XGBoost model is approximately 7.24 units lower than the baseline RMSE. This means that, on average, our model's predictions are closer to the actual values by about 7.24 units compared to simply predicting the mean of the INCIDENT_count for all observations.
+
+
+## Plotting the prediction
+Scatter Plot: Actual vs. Predicted
+
+
+```{r plotpred, warning=FALSE}
+plot(test_labels, predictions, main="Actual vs. Predicted", xlab="Actual", ylab="Predicted", pch=19, col="blue")
+abline(a=0, b=1, col="red") 
+
+
+
+
+```  
+  
+## Interpreting the results of the model
+1. Model Performance:
+
+  *   Baseline RMSE: 37.31
+  *   XGBoost Test RMSE: 30.07
+  *   The XGBoost model shows improved prediction accuracy compared to the baseline.
+
+2. Top Features:
+
+  *   PERP_SEXM (Perpetrator's Sex Male): Highly influential in predicting the target variable.
+  *   VIC_SEXM (Victim's Sex Male): Holds significant weight in the model's decision-making.
+  *   Age-Related Features: VIC_AGE_GROUP18-24 and PERP_AGE_GROUP18-24 show that age groups of both victim and perpetrator are vital for predictions.
+  *   Race-Related Features: PERP_RACEBLACK and VIC_RACEBLACK suggest racial factors also play a role in predictions.
+
+3. Less Influential Features:
+
+  *   PERP_AGE_GROUP940: Has minimal influence on the model's predictions, indicating potential less variability or correlation with the outcome.
+
+4. Conclusion:
+
+Gender, age, and race emerge as significant predictors based on the model's feature importance. However, understanding the full context and domain is crucial for in-depth interpretation.
+
+## Possible Bias in Data and in analysis
+
+1. Reporting Bias: 
+Not all shooting incidents may be reported or recorded with equal likelihood. Incidents in certain areas or involving certain demographic groups might be over- or under-reported.
+
+2. Analysing Bias:
+  *   Exclusion of variables. Some important variable can be omitted from the model.
+  *   Confirmation bias. Trying to confirm the existing notion about the relationship between two variables.
+  *   P-value hacking. Re-running analyses until you get a statistically significant result by chance.
+  *   Sampling bias. If some group is underrepresented in the data and this is not taken into account in the analysis.
+
+
